@@ -6,20 +6,37 @@ import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
 
+from app.services.bi_agent import AnalistaBIFiscal
 from app.services.extractor import ExtratorDocumentos
 from app.services.storage import RepositorioNotas
 
 load_dotenv()
 
 st.set_page_config(
-    page_title="Extrator & Validador Fiscal IA",
+    page_title="Fiscal-Lens-AI • Auditoria & BI",
     page_icon="🧾",
     layout="wide",
 )
 
+PERFIS_RBAC = {
+    "Admin / Financeiro": {
+        "secret_key": "APP_PASSWORD_ADMIN",
+        "fallback_pwd": "admin123",
+        "categorias": None,  # Acesso irrestrito
+        "pode_excluir": True,
+        "descricao": "Acesso total a todas as categorias, backup do banco e exclusão de registros.",
+    },
+    "Operacional / TI": {
+        "secret_key": "APP_PASSWORD_OPERACIONAL",
+        "fallback_pwd": "oper123",
+        "categorias": ["Software", "Transporte", "Material de Escritório", "Utilidades"],
+        "pode_excluir": False,
+        "descricao": "Acesso restrito a despesas operacionais (Software, Transporte, Escritório, Utilidades).",
+    },
+}
+
 
 def obter_segredo(chave: str, padrao: str = "") -> str:
-    """Lê de st.secrets (quando publicado online) ou do .env / variáveis de ambiente."""
     try:
         if chave in st.secrets:
             return str(st.secrets[chave])
@@ -29,44 +46,57 @@ def obter_segredo(chave: str, padrao: str = "") -> str:
 
 
 def verificar_autenticacao() -> bool:
-    """Bloqueia o acesso à aplicação até que a senha correta seja informada."""
-    senha_correta = obter_segredo("APP_PASSWORD", "admin123")
-
     if st.session_state.get("autenticado", False):
         return True
 
-    col_esq, col_centro, col_dir = st.columns([1, 1.3, 1])
+    col_esq, col_centro, col_dir = st.columns([1, 1.35, 1])
     with col_centro:
         st.markdown("<br><br>", unsafe_allow_html=True)
-        st.title("🔐 Acesso Restrito")
-        st.caption("Extrator & Validador Inteligente de Documentos")
+        st.title("🔐 Fiscal-Lens-AI • Login Corporativo")
+        st.caption("Controle de Acesso Baseado em Cargo (RBAC)")
 
         with st.form("form_login"):
-            senha_digitada = st.text_input("Senha de Acesso", type="password")
+            perfil_escolhido = st.selectbox("Perfil de Acesso", options=list(PERFIS_RBAC.keys()))
+            st.info(PERFIS_RBAC[perfil_escolhido]["descricao"])
+            senha_digitada = st.text_input("Senha do Perfil", type="password")
             entrar = st.form_submit_button("Entrar no Sistema", type="primary", use_container_width=True)
 
             if entrar:
+                cfg = PERFIS_RBAC[perfil_escolhido]
+                senha_correta = obter_segredo(cfg["secret_key"], cfg["fallback_pwd"])
                 if senha_digitada == senha_correta:
                     st.session_state.autenticado = True
+                    st.session_state.perfil_usuario = perfil_escolhido
+                    st.session_state.historico_chat_bi = []
                     st.rerun()
                 else:
-                    st.error("Senha incorreta. Tente novamente.")
+                    st.error("Senha incorreta para o perfil selecionado.")
 
     return False
 
 
-# Interrompe a renderização do restante da página se não estiver logado
 if not verificar_autenticacao():
     st.stop()
 
+perfil_atual = st.session_state.get("perfil_usuario", "Admin / Financeiro")
+regras_perfil = PERFIS_RBAC[perfil_atual]
+
 if "lote_processado" not in st.session_state:
     st.session_state.lote_processado = []
+if "historico_chat_bi" not in st.session_state:
+    st.session_state.historico_chat_bi = []
 
 repo = RepositorioNotas()
 
-# --- BARRA LATERAL (CONFIGURAÇÕES) ---
+# --- BARRA LATERAL (CONFIGURAÇÕES E RBAC ATIVO) ---
 with st.sidebar:
     st.header("⚙️ Configurações")
+    st.success(f"👤 **Perfil:** {perfil_atual}")
+    if regras_perfil["categorias"]:
+        st.caption(f"Escopo RBAC: {', '.join(regras_perfil['categorias'])}")
+    else:
+        st.caption("Escopo RBAC: Acesso Irrestrito")
+
     api_key_env = obter_segredo("GEMINI_API_KEY", "")
     api_key_input = st.text_input(
         "Gemini API Key",
@@ -77,7 +107,6 @@ with st.sidebar:
     cnpj_empresa = st.text_input(
         "CNPJ da Sua Empresa (Opcional)",
         placeholder="Ex: 12345678000199",
-        help="Se preenchido, alerta caso a nota tenha sido emitida para outro CNPJ.",
     )
     modelo_ia = st.selectbox(
         "Modelo Gemini",
@@ -85,15 +114,20 @@ with st.sidebar:
         index=0,
     )
     st.divider()
-    if st.button("🔒 Sair / Bloquear Tela", use_container_width=True):
+    if st.button("🔒 Trocar Perfil / Sair", use_container_width=True):
         st.session_state.autenticado = False
+        st.session_state.historico_chat_bi = []
         st.rerun()
-    st.caption("v1.3 • Login + Split-Screen + Dashboard + Gestão DB")
+    st.caption("v2.0 • IDP + RBAC + BI Conversacional")
 
-st.title("🧾 Extrator e Validador Inteligente de Documentos")
-st.markdown("Faça upload de notas fiscais, recibos ou boletos (PDF, PNG, JPG) para extração automática e auditoria.")
+st.title("🧾 Fiscal-Lens-AI • Inteligência Documental & BI")
+st.markdown("Extração multimodal auditada, controle de acesso por cargo (RBAC) e análise financeira em linguagem natural.")
 
-aba_processar, aba_historico = st.tabs(["📤 Processar & Revisar Lote", "🗄️ Dashboard & Banco de Dados"])
+aba_processar, aba_historico, aba_bi_chat = st.tabs([
+    "📤 Processar & Revisar Lote",
+    "🗄️ Dashboard & Banco de Dados",
+    "💬 Analista IA (BI Conversacional)",
+])
 
 # ==============================================================================
 # ABA 1: UPLOAD, EXTRAÇÃO E REVISÃO LADO A LADO
@@ -173,7 +207,6 @@ with aba_processar:
             barra.empty()
             st.session_state.lote_processado = resultados_temp
 
-    # --- PAINEL DE REVISÃO ---
     if st.session_state.lote_processado:
         st.divider()
         lote = st.session_state.lote_processado
@@ -190,7 +223,6 @@ with aba_processar:
         col3.metric("Com Alertas", qtd_revisao)
         col4.metric("Valor Total Lote", f"R$ {soma_valores:,.2f}")
 
-        # --- VISUALIZADOR LADO A LADO ---
         st.subheader("🔍 Conferência Lado a Lado (Documento vs. Dados Extraídos)")
         opcoes_docs = [
             f"{i + 1}. {item['status']} — {item['nome_arquivo']} ({item['nome_emissor']})"
@@ -269,26 +301,16 @@ with aba_processar:
 
             st.markdown("**Itens / Serviços Extraídos:**")
             if doc_atual["_itens_lista"]:
-                df_itens_doc = pd.DataFrame(doc_atual["_itens_lista"])
-                st.dataframe(df_itens_doc, use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(doc_atual["_itens_lista"]), use_container_width=True, hide_index=True)
             else:
                 st.caption("Nenhum item discriminado individualmente neste documento.")
 
-        # --- TABELA RESUMO DO LOTE E GRAVAÇÃO ---
         st.divider()
         st.subheader("📋 Resumo Geral do Lote")
         colunas_visiveis = [
-            "aprovar",
-            "status",
-            "nome_arquivo",
-            "tipo_documento",
-            "numero_documento",
-            "data_emissao",
-            "cnpj_emissor",
-            "nome_emissor",
-            "valor_total_documento",
-            "categoria_sugerida",
-            "alertas_texto",
+            "aprovar", "status", "nome_arquivo", "tipo_documento", "numero_documento",
+            "data_emissao", "cnpj_emissor", "nome_emissor", "valor_total_documento",
+            "categoria_sugerida", "alertas_texto",
         ]
 
         df_editado = st.data_editor(
@@ -338,7 +360,7 @@ with aba_processar:
                         })
 
                 qtd_salva = repo.salvar_lote(registros_para_salvar)
-                st.success(f"{qtd_salva} documento(s) gravado(s) com sucesso no banco de dados!")
+                st.success(f"{qtd_salva} documento(s) gravado(s) com sucesso!")
                 st.session_state.lote_processado = []
                 st.rerun()
 
@@ -348,37 +370,36 @@ with aba_processar:
                 st.rerun()
 
 # ==============================================================================
-# ABA 2: DASHBOARD FINANCEIRO, HISTÓRICO, EXCLUSÃO E EXPORTAÇÃO EXCEL
+# ABA 2: DASHBOARD FINANCEIRO (FILTRADO POR RBAC) E EXPORTAÇÃO
 # ==============================================================================
 with aba_historico:
-    df_resumo, df_itens = repo.listar_para_exportacao_excel()
+    df_resumo_bruto, df_itens = repo.listar_para_exportacao_excel()
+
+    # Aplica filtro de segurança RBAC antes de exibir qualquer número
+    if not df_resumo_bruto.empty and regras_perfil["categorias"]:
+        df_resumo = df_resumo_bruto[
+            df_resumo_bruto["categoria_sugerida"].isin(regras_perfil["categorias"])
+        ].copy()
+        st.info(f"🔒 Visão filtrada pela política RBAC do perfil **{perfil_atual}**.")
+    else:
+        df_resumo = df_resumo_bruto.copy()
 
     if df_resumo.empty:
-        st.info("Nenhum documento salvo no banco de dados ainda. Processe e salve notas na primeira aba para ver o dashboard.")
+        st.info("Nenhum documento disponível para o seu perfil no banco de dados ainda.")
     else:
-        # --- FILTROS DO DASHBOARD ---
         st.subheader("📊 Painel Financeiro e Auditoria")
         f1, f2 = st.columns(2)
         categorias_disponiveis = sorted(df_resumo["categoria_sugerida"].dropna().unique().tolist())
         tipos_disponiveis = sorted(df_resumo["tipo_documento"].dropna().unique().tolist())
 
-        cats_selecionadas = f1.multiselect(
-            "Filtrar por Categoria",
-            options=categorias_disponiveis,
-            default=categorias_disponiveis,
-        )
-        tipos_selecionados = f2.multiselect(
-            "Filtrar por Tipo de Documento",
-            options=tipos_disponiveis,
-            default=tipos_disponiveis,
-        )
+        cats_selecionadas = f1.multiselect("Filtrar por Categoria", options=categorias_disponiveis, default=categorias_disponiveis)
+        tipos_selecionados = f2.multiselect("Filtrar por Tipo de Documento", options=tipos_disponiveis, default=tipos_disponiveis)
 
         df_filtrado = df_resumo[
             df_resumo["categoria_sugerida"].isin(cats_selecionadas)
             & df_resumo["tipo_documento"].isin(tipos_selecionados)
         ].copy()
 
-        # --- KPIs EXECUTIVOS ---
         total_gasto = df_filtrado["valor_total_documento"].sum()
         qtd_notas = len(df_filtrado)
         ticket_medio = total_gasto / qtd_notas if qtd_notas > 0 else 0.0
@@ -393,37 +414,25 @@ with aba_historico:
 
         st.divider()
 
-        # --- GRÁFICOS POR CATEGORIA E FORNECEDOR ---
         g1, g2 = st.columns(2, gap="large")
-
         with g1:
             st.markdown("**💰 Gastos por Categoria (R$)**")
             if not df_filtrado.empty:
-                gastos_categoria = (
-                    df_filtrado.groupby("categoria_sugerida")["valor_total_documento"]
-                    .sum()
-                    .sort_values(ascending=False)
+                st.bar_chart(
+                    df_filtrado.groupby("categoria_sugerida")["valor_total_documento"].sum().sort_values(ascending=False),
+                    horizontal=True,
+                    color="#2563EB",
                 )
-                st.bar_chart(gastos_categoria, horizontal=True, color="#2563EB")
-            else:
-                st.caption("Sem dados para os filtros selecionados.")
-
         with g2:
             st.markdown("**🏢 Top 10 Fornecedores por Volume (R$)**")
             if not df_filtrado.empty:
-                gastos_fornecedor = (
-                    df_filtrado.groupby("nome_emissor")["valor_total_documento"]
-                    .sum()
-                    .sort_values(ascending=False)
-                    .head(10)
+                st.bar_chart(
+                    df_filtrado.groupby("nome_emissor")["valor_total_documento"].sum().sort_values(ascending=False).head(10),
+                    horizontal=True,
+                    color="#10B981",
                 )
-                st.bar_chart(gastos_fornecedor, horizontal=True, color="#10B981")
-            else:
-                st.caption("Sem dados para os filtros selecionados.")
 
         st.divider()
-
-        # --- TABELAS DETALHADAS ---
         st.subheader("📑 Registros Salvos")
         tab_res, tab_it = st.tabs(["📄 Resumo das Notas", "📦 Itens Detalhados"])
 
@@ -435,55 +444,133 @@ with aba_historico:
                 st.info("Nenhum item individual registrado nas notas salvas.")
             else:
                 ids_filtrados = set(df_filtrado["id"].tolist())
-                df_itens_filtrado = df_itens[df_itens["documento_id"].isin(ids_filtrados)]
-                st.dataframe(df_itens_filtrado, use_container_width=True, hide_index=True)
+                st.dataframe(df_itens[df_itens["documento_id"].isin(ids_filtrados)], use_container_width=True, hide_index=True)
 
-        # --- EXPORTAÇÃO E BACKUP ---
         buffer_excel = io.BytesIO()
         with pd.ExcelWriter(buffer_excel, engine="openpyxl") as writer:
             df_filtrado.to_excel(writer, index=False, sheet_name="Resumo_Notas")
             if not df_itens.empty:
                 ids_filtrados = set(df_filtrado["id"].tolist())
-                df_itens[df_itens["documento_id"].isin(ids_filtrados)].to_excel(
-                    writer, index=False, sheet_name="Itens_Detalhados"
-                )
+                df_itens[df_itens["documento_id"].isin(ids_filtrados)].to_excel(writer, index=False, sheet_name="Itens_Detalhados")
             else:
-                pd.DataFrame({"Aviso": ["Nenhum item detalhado extraído"]}).to_excel(
-                    writer, index=False, sheet_name="Itens_Detalhados"
-                )
+                pd.DataFrame({"Aviso": ["Nenhum item detalhado extraído"]}).to_excel(writer, index=False, sheet_name="Itens_Detalhados")
 
         col_exp1, col_exp2 = st.columns([2, 2])
         with col_exp1:
             st.download_button(
                 label="📥 Baixar Planilha Filtrada (2 Abas .xlsx)",
                 data=buffer_excel.getvalue(),
-                file_name="relatorio_fiscal_completo.xlsx",
+                file_name=f"relatorio_fiscal_{perfil_atual.split()[0].lower()}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
                 use_container_width=True,
             )
-        with col_exp2:
-            st.download_button(
-                label="🗄️ Baixar Backup do Banco (.db)",
-                data=repo.obter_bytes_banco(),
-                file_name="backup_notas_fiscais.db",
-                mime="application/octet-stream",
-                use_container_width=True,
-            )
 
-        # --- GERENCIAMENTO / EXCLUSÃO DE REGISTROS ---
-        st.divider()
-        with st.expander("🗑️ Gerenciar / Excluir Registro Salvo por Engano"):
-            opcoes_exclusao = {
-                int(row["id"]): f"ID #{row['id']} — {row['nome_emissor']} | Doc: {row['numero_documento'] or 'S/N'} | R$ {row['valor_total_documento']:,.2f} ({row['nome_arquivo']})"
-                for _, row in df_resumo.iterrows()
-            }
-            id_para_excluir = st.selectbox(
-                "Selecione o registro que deseja remover definitivamente do banco:",
-                options=list(opcoes_exclusao.keys()),
-                format_func=lambda x: opcoes_exclusao[x],
-            )
-            if st.button("❌ Excluir Registro Selecionado", type="secondary"):
-                if repo.excluir_documento(id_para_excluir):
-                    st.success(f"Registro ID #{id_para_excluir} removido com sucesso!")
-                    st.rerun()
+        if regras_perfil["pode_excluir"]:
+            with col_exp2:
+                st.download_button(
+                    label="🗄️ Baixar Backup Completo do Banco (.db)",
+                    data=repo.obter_bytes_banco(),
+                    file_name="backup_notas_fiscais.db",
+                    mime="application/octet-stream",
+                    use_container_width=True,
+                )
+
+            st.divider()
+            with st.expander("🗑️ Gerenciar / Excluir Registro Salvo (Exclusivo Admin)"):
+                opcoes_exclusao = {
+                    int(row["id"]): f"ID #{row['id']} — {row['nome_emissor']} | Doc: {row['numero_documento'] or 'S/N'} | R$ {row['valor_total_documento']:,.2f}"
+                    for _, row in df_resumo_bruto.iterrows()
+                }
+                id_para_excluir = st.selectbox(
+                    "Selecione o registro que deseja remover:",
+                    options=list(opcoes_exclusao.keys()),
+                    format_func=lambda x: opcoes_exclusao[x],
+                )
+                if st.button("❌ Excluir Registro Selecionado"):
+                    if repo.excluir_documento(id_para_excluir):
+                        st.success(f"Registro ID #{id_para_excluir} removido!")
+                        st.rerun()
+
+# ==============================================================================
+# ABA 3: ANALISTA IA - BI CONVERSACIONAL (TEXT-TO-SQL AUDITÁVEL COM RBAC)
+# ==============================================================================
+with aba_bi_chat:
+    st.subheader("💬 BI Conversacional • Pergunte aos Seus Dados Fiscais")
+    st.caption(
+        f"Faça perguntas em português sobre o banco SQLite. As consultas SQL são geradas automaticamente "
+        f"em modo somente leitura respeitando as permissões do perfil **{perfil_atual}**."
+    )
+
+    sugestoes = [
+        "Qual é o valor total gasto por categoria?",
+        "Quais são os 5 maiores fornecedores em volume financeiro?",
+        "Quantas notas foram aprovadas manualmente versus automaticamente?",
+        "Mostre todas as notas com valor acima de R$ 500.",
+    ]
+    cols_sug = st.columns(len(sugestoes))
+    pergunta_sugerida = None
+    for idx, sug in enumerate(sugestoes):
+        if cols_sug[idx].button(sug, use_container_width=True, key=f"sug_bi_{idx}"):
+            pergunta_sugerida = sug
+
+    # Renderiza histórico da conversa de BI
+    for msg in st.session_state.historico_chat_bi:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+            if "sql" in msg:
+                with st.expander("🔍 Ver Query SQL Auditada (Somente Leitura)"):
+                    st.code(msg["sql"], language="sql")
+            if "dados" in msg and isinstance(msg["dados"], pd.DataFrame) and not msg["dados"].empty:
+                df_msg = msg["dados"]
+                st.dataframe(df_msg, use_container_width=True, hide_index=True)
+                if msg.get("visualizacao") == "barras" and len(df_msg.columns) >= 2 and len(df_msg) > 1:
+                    col_cat, col_val = df_msg.columns[0], df_msg.columns[1]
+                    if pd.api.types.is_numeric_dtype(df_msg[col_val]):
+                        st.bar_chart(df_msg.set_index(col_cat)[col_val], horizontal=True)
+
+    pergunta_digitada = st.chat_input("Ex: Quanto gastamos no total e qual foi o maior fornecedor?")
+    pergunta_final = pergunta_sugerida or pergunta_digitada
+
+    if pergunta_final:
+        if not api_key_input:
+            st.error("Configure sua GEMINI_API_KEY na barra lateral.")
+        else:
+            st.session_state.historico_chat_bi.append({"role": "user", "content": pergunta_final})
+            with st.chat_message("user"):
+                st.markdown(pergunta_final)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Gerando consulta SQL segura e analisando banco..."):
+                    try:
+                        analista = AnalistaBIFiscal(api_key=api_key_input, model_name=modelo_ia)
+                        res_bi = analista.responder_pergunta(
+                            pergunta=pergunta_final,
+                            cargo=perfil_atual,
+                            categorias_permitidas=regras_perfil["categorias"],
+                        )
+                        st.markdown(res_bi["explicacao"])
+                        with st.expander("🔍 Ver Query SQL Auditada (Somente Leitura)"):
+                            st.code(res_bi["sql"], language="sql")
+
+                        df_res = res_bi["dados"]
+                        if df_res.empty:
+                            st.warning("Nenhum registro encontrado para essa consulta dentro do seu escopo de acesso.")
+                        else:
+                            st.dataframe(df_res, use_container_width=True, hide_index=True)
+                            if res_bi["visualizacao"] == "barras" and len(df_res.columns) >= 2 and len(df_res) > 1:
+                                col_cat, col_val = df_res.columns[0], df_res.columns[1]
+                                if pd.api.types.is_numeric_dtype(df_res[col_val]):
+                                    st.bar_chart(df_res.set_index(col_cat)[col_val], horizontal=True)
+
+                        st.session_state.historico_chat_bi.append({
+                            "role": "assistant",
+                            "content": res_bi["explicacao"],
+                            "sql": res_bi["sql"],
+                            "dados": df_res,
+                            "visualizacao": res_bi["visualizacao"],
+                        })
+                    except Exception as e:
+                        erro_msg = f"Não foi possível executar a análise: {e}"
+                        st.error(erro_msg)
+                        st.session_state.historico_chat_bi.append({"role": "assistant", "content": erro_msg})
